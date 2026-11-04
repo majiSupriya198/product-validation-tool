@@ -1,0 +1,85 @@
+# Validation rules. Everything here is optional; sensible defaults apply.
+# Attribute names are matched case-insensitively after removing non-alphanumerics.
+
+# Uploaded column -> production path. Paths are dotted, rooted at the record:
+#   extract.*, parsed.*, feedback.*, gather.*, metadata.*
+aliases:
+  Storage_and_Usage: extract.storage
+  coments: feedback.comments
+  comments: feedback.comments
+  avgRating: feedback.avgRating
+  commentCount: feedback.commentCount
+  recommendation: feedback.recommendation
+  originalURL: gather.url
+
+# Columns never compared (identifiers used only for matching, or crawler metadata).
+skip_attributes:
+  - Pagetype
+  - originalURL
+
+# Comparator per attribute (first match wins). Patterns are fnmatch-style on the
+# normalized attribute key (lowercase, dots kept). Anything not listed is inferred.
+comparators:
+  - {pattern: "productno", type: exact}
+  - {pattern: "gtin", type: exact}
+  - {pattern: "groupid", type: exact}
+  - {pattern: "name", type: name}
+  - {pattern: "brand", type: exact}
+  - {pattern: "country", type: exact}
+  - {pattern: "manufacturer", type: name}
+  - {pattern: "seller", type: exact}
+  - {pattern: "currency", type: exact}
+  - {pattern: "parsed.perunit", type: exact}    # unit label, e.g. "KG"
+  - {pattern: "perunit", type: exact}
+  - {pattern: "*netquantityunit", type: exact}
+  - {pattern: "*promotiontype", type: exact}
+  - {pattern: "imageurl", type: images}
+  - {pattern: "ingredients", type: list}
+  - {pattern: "bulletpoints", type: list}
+  - {pattern: "badge", type: list}
+  - {pattern: "breadcrumb", type: list}
+  - {pattern: "nutrition", type: keyvalue}
+  - {pattern: "comments*", type: nested}
+  - {pattern: "promotions*", type: nested}
+  - {pattern: "parsed.promotions*", type: nested}
+  - {pattern: "price", type: numeric}
+  - {pattern: "priceperunit", type: numeric}
+  - {pattern: "netquantity", type: numeric}
+  - {pattern: "parsed.*", type: numeric}
+  - {pattern: "avgrating", type: numeric}
+  - {pattern: "commentcount", type: numeric}
+  - {pattern: "rank", type: numeric}
+  - {pattern: "outofstock", type: exact}
+  - {pattern: "video", type: boolean}
+  - {pattern: "hasrichcontent", type: boolean}
+  - {pattern: "sponsored", type: boolean}
+  - {pattern: "*", type: text}
+
+numeric:
+  abs_tolerance: 0.01
+  rel_tolerance: 0.005
+
+text:
+  # list items count as the same if token Jaccard >= this
+  item_match_threshold: 0.8
+
+scoring:
+  match_threshold: 0.98      # score >= this  -> match
+  partial_threshold: 0.5     # score >= this  -> partial, below -> mismatch
+  # Optional per-attribute weights for the product match %. Default 1.
+  weights: {}
+  # Count "missing in production" as 0 in the match % (true) or exclude it (false).
+  missing_counts_as_zero: true
+  # Boolean flags (video, sponsored, ...): uploaded False with an empty production field is
+  # treated as "no value" (N/A) rather than missing. Set false to count it as missing.
+  false_equals_empty: true
+
+matching:
+  # identifiers per query (one bound parameter each). Lower it if the warehouse rejects large IN lists.
+  chunk_size: 500
+  # For unmatched products, look this many days back (both tables) to explain why: last crawl date,
+  # found only in the other table, etc. 0 turns the extra query off.
+  last_seen_lookback_days: 180
+  # Prefix LIKE fallback on names (expensive). Off by default.
+  name_prefix_like: false
+  name_prefix_like_max: 50
