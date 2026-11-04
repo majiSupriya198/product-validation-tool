@@ -31,7 +31,7 @@ def _env(name: str, default: str = "") -> str:
 
 @dataclass
 class DBXSettings:
-    host: str = field(default_factory=lambda: _env("DBX_HOST"))
+    host: str = field(default_factory=lambda: _env("DBX_HOST").removeprefix("https://").rstrip("/"))
     http_path: str = field(default_factory=lambda: _env("DBX_HTTP_PATH"))
     warehouse_id: str = field(default_factory=lambda: _env("DBX_WAREHOUSE_ID"))
     token: str = field(default_factory=lambda: _env("DBX_TOKEN"), repr=False)
@@ -41,10 +41,12 @@ class DBXSettings:
     detail_table: str = field(default_factory=lambda: _env("DBX_DETAIL_TABLE", "sku_detail_v2"))
     search_table: str = field(default_factory=lambda: _env("DBX_SEARCH_TABLE", "sku_search_v2"))
     query_timeout: int = field(default_factory=lambda: int(_env("DBX_QUERY_TIMEOUT", "300") or 300))
+    # CA bundle for TLS. Empty = certifi's bundle (Python's system store can be broken on macOS).
+    ca_bundle: str = field(default_factory=lambda: _env("DBX_CA_BUNDLE"))
 
     def resolved_http_path(self) -> str:
         if self.http_path:
-            return self.http_path
+            return "/" + self.http_path.lstrip("/")  # tolerate "sql/1.0/..." without the leading slash
         if self.warehouse_id:
             return f"/sql/1.0/warehouses/{self.warehouse_id}"
         return ""

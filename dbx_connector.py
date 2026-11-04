@@ -86,10 +86,16 @@ class LiveSource:
             raise SourceError("Databricks isn't configured. Set DBX_HOST, DBX_HTTP_PATH (or DBX_WAREHOUSE_ID) and DBX_TOKEN in .env.")
         from databricks import sql as dbsql
 
+        import certifi
+
         kwargs: dict[str, Any] = {
             "server_hostname": self.settings.host,
             "http_path": self.settings.resolved_http_path(),
             "_socket_timeout": self.settings.query_timeout,
+            "_tls_trusted_ca_file": self.settings.ca_bundle or certifi.where(),
+            # fail fast on connection errors instead of the connector's 15-minute retry window
+            "_retry_stop_after_attempts_count": 3,
+            "_retry_stop_after_attempts_duration": 120,
         }
         if self.settings.auth_type == "databricks-oauth" and not self.settings.token:
             kwargs["auth_type"] = "databricks-oauth"
