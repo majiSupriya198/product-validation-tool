@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 output/validation_reports/**/*.xlsx
 output/logs/
+.DS_Store
