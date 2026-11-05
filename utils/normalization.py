@@ -102,9 +102,9 @@ def parse_number(value: Any) -> float | None:
         return None
 
 
-_UNIT = re.compile(r"(?:/\s*\d*\s*)?(kilogram|kg|gram|g|mg|milliliter|ml|cl|liter|litre|l|stk|stück|st|pcs|piece|pieces|each|ea|units?|lb|oz|m|cm)\b", re.I)
+_UNIT = re.compile(r"(?:/\s*\d*\s*)?(kilogram|kg|gram|g|mg|milliliter|ml|cl|liter|litre|l|stk|stück|st|pcs|pce|pc|piece|pieces|each|ea|ct|count|units?|lb|oz|m|cm)\b", re.I)
 _UNIT_CANON = {"stück": "stk", "st": "stk", "pcs": "stk", "piece": "stk", "pieces": "stk", "each": "stk", "ea": "stk",
-               "unit": "stk", "units": "stk", "liter": "l", "litre": "l", "kilogram": "kg", "gram": "g", "milliliter": "ml"}
+               "unit": "stk", "units": "stk", "ea": "stk", "pc": "stk", "pce": "stk", "ct": "stk", "count": "stk", "liter": "l", "litre": "l", "kilogram": "kg", "gram": "g", "milliliter": "ml"}
 
 
 def parse_unit(value: Any) -> str | None:

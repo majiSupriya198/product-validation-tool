@@ -1,6 +1,7 @@
 """Numeric comparator: tolerant of currency symbols, decimal commas and unit labels."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from comparators.base import CompareContext, CompareResult
@@ -42,5 +43,27 @@ def compare_numeric(up: Any, prod: Any, ctx: CompareContext) -> CompareResult:
     if ua and ub and ua != ub:
         ev["unit_mismatch"] = True
         return CompareResult(0.0, "numeric", evidence=ev)
-    score = 1.0 if _close(a, b, ctx) else 0.0
-    return CompareResult(score, "numeric (tolerance)", evidence=ev)
+    if _close(a, b, ctx):
+        return CompareResult(1.0, "numeric (tolerance)", evidence=ev)
+    # uploaded values are often display-rounded (rating "4.5" vs production 4.4694): equal once
+    # production is rounded to the uploaded value's decimal places
+    places = _decimals(up_vals[0])
+    if ctx.round_to_uploaded and places and _decimals(raw_b, b) > places and round(b, places) == round(a, places):
+        ev["note"] = f"equal after rounding production to {places} decimal place{'s' if places > 1 else ''}"
+        return CompareResult(1.0, "numeric (rounded to uploaded precision)", evidence=ev)
+    return CompareResult(0.0, "numeric (tolerance)", evidence=ev)
+
+
+def _decimals(raw: Any, value: float | None = None) -> int:
+    """Decimal places as written: '4.5' -> 1, '13,27 €' -> 2, 4.469387 -> 6, '3656' -> 0."""
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, (int, float)) and value is None:
+        value = float(raw)
+    if isinstance(raw, str):
+        m = re.search(r"\d+[.,](\d+)", raw)
+        return len(m.group(1)) if m else 0
+    if value is not None:
+        s = repr(float(value))
+        return 0 if s.endswith(".0") else len(s.split(".")[1]) if "." in s else 0
+    return 0

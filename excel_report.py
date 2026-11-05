@@ -1,4 +1,7 @@
-"""Five-sheet Excel report: Summary, Attribute Comparison, Missing Attributes, Unmatched Products, Raw DBX Data."""
+"""Validation report (7 sheets):
+Overall Summary, Extract Comparison, Parsed Comparison, Feedback Comparison (attribute + review level),
+Missing Attributes, Unmatched Products, DBX Raw Data.
+"""
 from __future__ import annotations
 
 import json
@@ -13,22 +16,22 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from json_flattener import EXCEL_CELL_LIMIT, force_text, to_cell_text
 from pipeline import RunResult
 from scoring_engine import methodology_text
 from utils.normalization import short
 
-EXCEL_CELL_LIMIT = 32_000
-
 HEADLINE = "210235"
-ACCENT = "C231FF"
 BLUE = "1F22B2"
 FONT = "DM Sans"
+SECTION_TITLES = {"extract": "Extract", "parsed": "Parsed", "feedback": "Feedback"}
 
 FILL = {
     "Match": PatternFill("solid", fgColor="C6EFCE"),
     "Partial": PatternFill("solid", fgColor="FFEB9C"),
     "Mismatch": PatternFill("solid", fgColor="FFC7CE"),
     "Missing in production": PatternFill("solid", fgColor="FFC7CE"),
+    "Extra in production": PatternFill("solid", fgColor="DDEBF7"),
     "N/A": PatternFill("solid", fgColor="E7E6E6"),
     "Not in schema": PatternFill("solid", fgColor="E7E6E6"),
 }
@@ -41,23 +44,14 @@ THIN = Border(bottom=Side(style="thin", color="D9D9D9"))
 
 
 def _cell(v: Any) -> Any:
-    if v is None:
-        return None
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return v
-    if isinstance(v, (list, dict)):
-        v = json.dumps(v, ensure_ascii=False, default=str)
-    s = str(v)
-    if s and s[0] in "=+-@":  # never let a value become a formula
-        s = "'" + s
-    if len(s) > EXCEL_CELL_LIMIT:
-        s = s[:EXCEL_CELL_LIMIT] + " …[truncated]"
-    return s
+    v = to_cell_text(v)
+    if isinstance(v, str) and len(v) > EXCEL_CELL_LIMIT:
+        v = v[:EXCEL_CELL_LIMIT] + " …[truncated in report; full value in the standardized input]"
+    return v
 
 
 def _table(ws: Worksheet, start_row: int, headers: list[str], rows: Iterable[list[Any]],
            widths: dict[str, int] | None = None, wrap: set[str] | None = None) -> tuple[int, int]:
-    """Write a header + rows block with filter. Returns (first_row, last_row)."""
     widths, wrap = widths or {}, wrap or set()
     for j, h in enumerate(headers, 1):
         c = ws.cell(row=start_row, column=j, value=h)
@@ -68,18 +62,17 @@ def _table(ws: Worksheet, start_row: int, headers: list[str], rows: Iterable[lis
         r = r_i
         for j, v in enumerate(row, 1):
             c = ws.cell(row=r, column=j, value=_cell(v))
+            force_text(c)
             c.font = BODY_FONT
             c.border = THIN
             c.alignment = Alignment(vertical="top", wrap_text=headers[j - 1] in wrap)
-    last_col = get_column_letter(len(headers))
-    ws.auto_filter.ref = f"A{start_row}:{last_col}{max(r, start_row)}"
+    ws.auto_filter.ref = f"A{start_row}:{get_column_letter(len(headers))}{max(r, start_row)}"
     for j, h in enumerate(headers, 1):
         ws.column_dimensions[get_column_letter(j)].width = widths.get(h, min(max(len(h) + 4, 12), 40))
     return start_row, r
 
 
 def _status_colors(ws: Worksheet, status_col: str, cols: list[str], first: int, last: int) -> None:
-    """Colour the given columns by the status text in status_col (conditional formatting, so filters keep it)."""
     if last <= first:
         return
     for col in cols:
@@ -89,7 +82,6 @@ def _status_colors(ws: Worksheet, status_col: str, cols: list[str], first: int, 
 
 
 def _pct_colors(ws: Worksheet, cols: list[str], first: int, last: int) -> None:
-    """Colour percentage cells: 100 green, 50-99 yellow, <50 red, blank grey."""
     if last <= first:
         return
     for col in cols:
@@ -113,71 +105,62 @@ def _matching_desc(m) -> str:
 def build_report(run: RunResult) -> Workbook:
     wb = Workbook()
     _summary(wb.active, run)
-    _comparison(wb.create_sheet("Attribute Comparison"), run)
+    for sec in ("extract", "parsed", "feedback"):
+        _comparison(wb.create_sheet(f"{SECTION_TITLES[sec]} Comparison"), run, sec)
     _missing(wb.create_sheet("Missing Attributes"), run)
     _unmatched(wb.create_sheet("Unmatched Products"), run)
-    _raw(wb.create_sheet("Raw DBX Data"), run)
+    _raw(wb.create_sheet("DBX Raw Data"), run)
     return wb
 
 
 def _summary(ws: Worksheet, run: RunResult) -> None:
-    ws.title = "Summary"
+    ws.title = "Overall Summary"
     s = run.summary()
     ws["A1"] = "Product data validation report"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = (f"Generated {datetime.now():%Y-%m-%d %H:%M} · Source: {run.source_name} · Retailer filter: "
                 f"{run.retailer or 'any'} · Production dates {run.start} to {run.end} · Run time {run.seconds:.1f}s")
     ws["A2"].font = Font(name=FONT, size=10, italic=True, color="595959")
-
     kpis = [
-        ("Total uploaded products", s["uploaded"]),
-        ("Products found in DBX", s["found"]),
-        ("Products not found in DBX", s["not_found"]),
-        ("Ambiguous matches (flagged)", s["ambiguous"]),
-        ("Average product match %", s["avg_match_pct"]),
-        ("Average production completeness %", s["avg_completeness_pct"]),
-        ("Matched attributes", s["matched"]),
-        ("Partially matched attributes", s["partial"]),
-        ("Mismatched attributes", s["mismatched"]),
-        ("Missing in production (attributes)", s["missing_in_prod"]),
-        ("Unavailable attributes (N/A or not in schema)", s["unavailable"]),
+        ("Uploaded products", s["uploaded"]), ("Found in DBX", s["found"]), ("Not found", s["not_found"]),
+        ("Ambiguous matches", s["ambiguous"]), ("Avg Extract %", s["avg_extract_pct"]),
+        ("Avg Parsed %", s["avg_parsed_pct"]), ("Avg Feedback %", s["avg_feedback_pct"]),
+        ("Avg Overall %", s["avg_match_pct"]), ("Avg Completeness %", s["avg_completeness_pct"]),
+        ("Matched attrs", s["matched"]), ("Partial", s["partial"]), ("Mismatched", s["mismatched"]),
+        ("Missing in prod", s["missing_in_prod"]), ("Unavailable", s["unavailable"]),
     ]
-    # KPIs laid out horizontally (label row + value row) so the product table starts near the top
     for j, (k, v) in enumerate(kpis, 1):
         lc = ws.cell(row=4, column=j, value=k)
         lc.font = Font(name=FONT, bold=True, size=9, color="595959")
         lc.alignment = Alignment(wrap_text=True, vertical="bottom")
         vc = ws.cell(row=5, column=j, value=v)
         vc.font = Font(name=FONT, bold=True, size=14, color=BLUE)
-    ws.row_dimensions[4].height = 42
-    row = 7
-    ws.cell(row=row, column=1, value="Products").font = SUB_FONT
-    row += 1
-    headers = ["Product Name", "ProductNo", "Pagetype", "DBX Status", "Overall Match %", "Completeness %",
-               "Matched", "Partial", "Mismatched", "Missing in Prod", "Unavailable", "Retailer",
+    ws.row_dimensions[4].height = 30
+    ws.cell(row=7, column=1, value="Products").font = SUB_FONT
+    headers = ["Product", "ProductNo", "Pagetype", "Retailer", "Extract %", "Parsed %", "Feedback %", "Overall %",
+               "Completeness %", "Matched", "Partial", "Mismatched", "Missing in Prod", "DBX Status",
                "DBX Timestamp", "Matching Method", "Notes"]
     rows = []
     for o in run.outcomes:
         m, sc = o.match, o.score
         status = ("Found (ambiguous)" if m.ambiguous else "Found") if m.found else "Not found"
-        rows.append([m.product.identifiers.get("name"), m.product.identifiers.get("productNo"), m.pagetype, status,
-                     sc.match_pct if sc else None, sc.completeness_pct if sc else None,
-                     sc.matched if sc else None, sc.partial if sc else None, sc.mismatched if sc else None,
-                     sc.missing_in_prod if sc else None, sc.unavailable if sc else None,
-                     m.retailer, m.dbx_timestamp, m.method, " | ".join(m.notes) or m.not_found_reason])
-    first, last = _table(ws, row, headers, rows, widths={"Product Name": 42, "Notes": 60, "DBX Timestamp": 24,
-                                                          "Matching Method": 22, "DBX Status": 16, "Retailer": 16},
-                         wrap={"Notes"})
-    _pct_colors(ws, ["E", "F"], first, last)
+        rows.append([m.product.identifiers.get("name"), m.product.identifiers.get("productNo"), m.pagetype, m.retailer,
+                     sc.section_pct("extract") if sc else None, sc.section_pct("parsed") if sc else None,
+                     sc.section_pct("feedback") if sc else None, sc.match_pct if sc else None,
+                     sc.completeness_pct if sc else None, sc.matched if sc else None, sc.partial if sc else None,
+                     sc.mismatched if sc else None, sc.missing_in_prod if sc else None, status, m.dbx_timestamp,
+                     m.method, " | ".join(m.notes) or m.not_found_reason])
+    first, last = _table(ws, 8, headers, rows,
+                         widths={"Product": 44, "Notes": 60, "DBX Timestamp": 24, "Matching Method": 20,
+                                 "DBX Status": 16, "Retailer": 16, "ProductNo": 14}, wrap={"Notes"})
+    _pct_colors(ws, ["E", "F", "G", "H", "I"], first, last)
     ws.freeze_panes = ws.cell(row=first + 1, column=2)
-    ws.column_dimensions["A"].width = 46
-
     row = last + 3
     if run.warnings:
         ws.cell(row=row, column=1, value="Input warnings").font = SUB_FONT
         for w in run.warnings:
             row += 1
-            ws.cell(row=row, column=1, value=w).font = BODY_FONT
+            ws.cell(row=row, column=1, value=_cell(w)).font = BODY_FONT
         row += 2
     ws.cell(row=row, column=1, value="Methodology").font = SUB_FONT
     for k, v in methodology_text(run.rules):
@@ -185,35 +168,50 @@ def _summary(ws: Worksheet, run: RunResult) -> None:
         ws.cell(row=row, column=1, value=k).font = Font(name=FONT, bold=True, size=10)
         c = ws.cell(row=row, column=2, value=v)
         c.font = BODY_FONT
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=10)
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=12)
 
 
-def _comparison(ws: Worksheet, run: RunResult) -> None:
-    headers = ["Product Name", "ProductNo", "Original URL", "Pagetype", "Attribute Name", "Uploaded Value",
-               "Production Value", "Match Percentage", "Match Status", "Mismatch Reason", "Missing Content",
-               "Extra Content", "Production Field", "Comparison Method", "DBX Timestamp", "Matching Method", "Retailer"]
+COMPARISON_HEADERS = ["Product", "ProductNo", "Original URL", "Pagetype", "Level", "Attribute", "Review",
+                      "Uploaded Value", "Production Value", "Match %", "Status", "Mismatch Reason",
+                      "Missing Content", "Extra Content", "Production Field", "Comparison Method",
+                      "DBX Timestamp", "Matching Method", "Retailer"]
+
+
+def _comparison(ws: Worksheet, run: RunResult, section: str) -> None:
+    headers = [h for h in COMPARISON_HEADERS if section == "feedback" or h != "Review"]
     rows = []
     for o in run.found:
         m = o.match
         ids = m.product.identifiers
+        base = [ids.get("name"), ids.get("productNo"), ids.get("originalURL"), m.pagetype]
+        tail = [m.dbx_timestamp, _matching_desc(m), m.retailer]
         for a in o.attributes:
-            rows.append([ids.get("name"), ids.get("productNo"), ids.get("originalURL"), m.pagetype, a.attribute,
-                         short(a.uploaded_value, 2000), short(a.production_value, 2000), a.pct, a.status,
-                         a.reason, short(a.missing, 1000) if a.missing else None,
-                         short(a.extra, 1000) if a.extra else None, a.prod_path, a.comparator,
-                         m.dbx_timestamp, _matching_desc(m), m.retailer])
+            if a.section != section:
+                continue
+            rec = base + ["Attribute", a.field] + ([None] if section == "feedback" else []) + [
+                short(a.uploaded_value, 2000), short(a.production_value, 2000), a.pct, a.status, a.reason,
+                short(a.missing, 1000) if a.missing else None, short(a.extra, 1000) if a.extra else None,
+                a.prod_path, a.comparator] + tail
+            rows.append(rec)
+            if section == "feedback":
+                for d in a.details:
+                    rows.append(base + ["Review", a.field, d["review"], d["uploaded"], d["production"], d["score"],
+                                        d["status"], d["differences"] or "All compared fields equal.", None, None,
+                                        a.prod_path, d["pairing"]] + tail)
+    status_col = get_column_letter(headers.index("Status") + 1)
+    pct_col = get_column_letter(headers.index("Match %") + 1)
     first, last = _table(ws, 1, headers, rows,
-                         widths={"Product Name": 36, "Original URL": 30, "Attribute Name": 22, "Uploaded Value": 45,
-                                 "Production Value": 45, "Mismatch Reason": 70, "Missing Content": 35,
-                                 "Extra Content": 35, "Production Field": 24, "Comparison Method": 26,
-                                 "DBX Timestamp": 24, "Matching Method": 30, "Match Status": 20},
+                         widths={"Product": 34, "Original URL": 28, "Attribute": 22, "Uploaded Value": 45,
+                                 "Production Value": 45, "Mismatch Reason": 70, "Missing Content": 32,
+                                 "Extra Content": 32, "Production Field": 24, "Comparison Method": 26,
+                                 "DBX Timestamp": 24, "Matching Method": 28, "Status": 20, "Review": 16, "Level": 10},
                          wrap={"Uploaded Value", "Production Value", "Mismatch Reason", "Missing Content", "Extra Content"})
-    _status_colors(ws, "I", ["H", "I"], first, last)
-    ws.freeze_panes = "F2"
+    _status_colors(ws, status_col, [pct_col, status_col], first, last)
+    ws.freeze_panes = ws.cell(row=2, column=headers.index("Attribute") + 2)
 
 
 def _missing(ws: Worksheet, run: RunResult) -> None:
-    headers = ["Product Name", "ProductNo", "Pagetype", "Attribute Name", "Uploaded Value", "Production Field",
+    headers = ["Product", "ProductNo", "Pagetype", "Section", "Attribute", "Uploaded Value", "Production Field",
                "Reason", "DBX Timestamp", "Retailer"]
     rows = []
     for o in run.found:
@@ -221,23 +219,22 @@ def _missing(ws: Worksheet, run: RunResult) -> None:
         for a in o.attributes:
             if a.status in ("Missing in production", "Not in schema"):
                 rows.append([m.product.identifiers.get("name"), m.product.identifiers.get("productNo"), m.pagetype,
-                             a.attribute, short(a.uploaded_value, 1000), a.prod_path or "(no matching field)",
-                             a.reason, m.dbx_timestamp, m.retailer])
-    first, last = _table(ws, 1, headers, rows, widths={"Product Name": 40, "Uploaded Value": 50, "Reason": 60,
-                                                       "Attribute Name": 22, "Production Field": 24, "DBX Timestamp": 24},
-                         wrap={"Uploaded Value", "Reason"})
+                             SECTION_TITLES.get(a.section, a.section), a.field, short(a.uploaded_value, 1000),
+                             a.prod_path or "(no matching field)", a.reason, m.dbx_timestamp, m.retailer])
+    _table(ws, 1, headers, rows, widths={"Product": 40, "Uploaded Value": 50, "Reason": 60, "Attribute": 22,
+                                         "Production Field": 24, "DBX Timestamp": 24}, wrap={"Uploaded Value", "Reason"})
     ws.freeze_panes = "B2"
 
 
 def _unmatched(ws: Worksheet, run: RunResult) -> None:
-    headers = ["Product Name", "ProductNo", "Original URL", "Pagetype", "File Row", "Identifiers Attempted", "Reason"]
+    headers = ["Product", "ProductNo", "Original URL", "Pagetype", "File Row", "Identifiers Attempted", "Reason"]
     rows = []
     for o in run.not_found:
         m = o.match
         ids = m.product.identifiers
         rows.append([ids.get("name"), ids.get("productNo"), ids.get("originalURL"), m.pagetype, m.product.row_index,
                      "\n".join(m.attempted) or "none", m.not_found_reason])
-    _table(ws, 1, headers, rows, widths={"Product Name": 40, "Original URL": 50, "Identifiers Attempted": 55, "Reason": 70},
+    _table(ws, 1, headers, rows, widths={"Product": 40, "Original URL": 50, "Identifiers Attempted": 55, "Reason": 70},
            wrap={"Identifiers Attempted", "Reason"})
     ws.freeze_panes = "B2"
 
@@ -255,23 +252,21 @@ def _flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
 
 
 def _raw(ws: Worksheet, run: RunResult) -> None:
-    flat_rows = []
-    keys: dict[str, None] = {}
+    flat_rows, keys = [], {}
     for o in run.found:
-        m = o.match
-        flat = _flatten(m.record)
-        flat_rows.append((m, flat))
+        flat = _flatten(o.match.record)
+        flat_rows.append((o.match, flat))
         for k in flat:
             keys.setdefault(k, None)
     order = ["id", "timestamp", "metadata.retailer", "gather.url"]
     cols = [k for k in order if k in keys] + sorted(k for k in keys if k not in order)
-    headers = ["Product Name (upload)", "ProductNo (upload)", "File Row", "Matching Method", "Uploaded Row (JSON)"] + cols
+    headers = ["Product (upload)", "ProductNo (upload)", "File Row", "Matching Method", "Uploaded Row (JSON)"] + cols
     rows = []
     for m, flat in flat_rows:
         ids = m.product.identifiers
         rows.append([ids.get("name"), ids.get("productNo"), m.product.row_index, _matching_desc(m),
                      json.dumps(m.product.original, ensure_ascii=False, default=str)] + [flat.get(c) for c in cols])
-    _table(ws, 1, headers, rows, widths={"Product Name (upload)": 36, "Uploaded Row (JSON)": 40})
+    _table(ws, 1, headers, rows, widths={"Product (upload)": 36, "Uploaded Row (JSON)": 40})
     ws.freeze_panes = "C2"
 
 

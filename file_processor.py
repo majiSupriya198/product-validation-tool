@@ -22,6 +22,23 @@ IDENTIFIER_ALIASES = {
 }
 
 
+PAGETYPE_ALIASES = {
+    "detail": {"detail", "details", "product", "products", "pdp", "productpage", "product_page", "item", "itempage"},
+    "search": {"search", "searches", "listing", "plp", "category", "searchpage", "search_page", "serp"},
+}
+
+
+def normalize_pagetype(value: str | None) -> str | None:
+    """'Product' / 'PDP' -> 'detail', 'Listing' / 'PLP' -> 'search'. Unknown values pass through lowercased."""
+    if not value:
+        return None
+    v = str(value).strip().lower()
+    for canon, names in PAGETYPE_ALIASES.items():
+        if v in names:
+            return canon
+    return v
+
+
 class InputFileError(ValueError):
     """Raised for unreadable or unusable input files."""
 
@@ -46,6 +63,16 @@ class ParsedFile:
     identifier_columns: dict[str, str | None]
     dropped_columns: list[str]
     warnings: list[str]
+    format: str = "flat"                  # flat | standardized (JSON sections)
+
+    @property
+    def uploaded_retailers(self) -> list[str]:
+        return sorted({p.identifiers["retailer"] for p in self.products if p.identifiers.get("retailer")})
+
+    @property
+    def timestamp_range(self) -> tuple[str, str] | None:
+        ts = sorted(p.identifiers["timestamp"][:10] for p in self.products if p.identifiers.get("timestamp"))
+        return (ts[0], ts[-1]) if ts else None
 
 
 def _norm_col(c: str) -> str:
@@ -94,6 +121,106 @@ def read_table(source: str | Path | BinaryIO | bytes, filename: str | None = Non
 
 def parse_file(source: str | Path | BinaryIO | bytes, filename: str | None = None,
                pagetype_override: str | None = None) -> ParsedFile:
+    """Read any supported upload. JSON-section CSVs are transformed to the standardized workbook first."""
+    from csv_transformer import TransformError, detect, transform
+
+    name = filename or (str(source) if isinstance(source, (str, Path)) else "upload")
+    data = source if isinstance(source, bytes) else (Path(source).read_bytes() if isinstance(source, (str, Path)) else source.read())
+    try:
+        det = detect(data, name)
+    except TransformError as exc:
+        raise InputFileError(str(exc)) from exc
+    except Exception as exc:
+        raise InputFileError(f"Could not read {Path(name).name}: {exc}") from exc
+    if det.format == "json_sections":
+        try:
+            result = transform(data, name)
+        except TransformError as exc:
+            raise InputFileError(str(exc)) from exc
+        parsed = parse_standardized(result.workbook_bytes, pagetype_override)
+        parsed.warnings = result.warnings + parsed.warnings
+        return parsed
+    if det.format == "standardized":
+        return parse_standardized(data, pagetype_override)
+    return _parse_flat(data, name, pagetype_override)
+
+
+def parse_standardized(data: bytes, pagetype_override: str | None = None) -> ParsedFile:
+    """Read a standardized workbook (see csv_transformer). Attribute keys are section-qualified:
+    extract.<field>, parsed.<field>, feedback.<field>."""
+    from csv_transformer import SHEETS
+    from json_flattener import join_long_cells
+
+    try:
+        xl = pd.ExcelFile(io.BytesIO(data), engine="openpyxl")
+    except Exception as exc:
+        raise InputFileError(f"Could not read the standardized workbook: {exc}") from exc
+
+    def sheet(name: str) -> dict[int, dict]:
+        if name not in xl.sheet_names:
+            return {}
+        df = xl.parse(name, dtype=str, keep_default_na=False)
+        out = {}
+        for r in df.to_dict(orient="records"):
+            r = join_long_cells(r)
+            try:
+                out[int(float(r.pop("_row")))] = r
+            except (KeyError, ValueError):
+                continue
+        return out
+
+    product, parsed_s, feedback, meta, original = (sheet(SHEETS[k]) for k in ("product", "parsed", "feedback", "meta", "original"))
+    if not product:
+        raise InputFileError("The standardized workbook has no rows in 'Product Data'.")
+    warnings: list[str] = []
+    products: list[Product] = []
+    skip_feedback = {"feedback.review_count"}
+    for row_no in sorted(product):
+        ex = product[row_no]
+        attrs: dict[str, Any] = {}
+        for k, v in ex.items():
+            if k.startswith("__"):
+                continue
+            attrs[f"extract.{k}"] = clean_cell(v)
+        for k, v in parsed_s.get(row_no, {}).items():
+            if k.startswith("parsed."):
+                attrs[k] = clean_cell(v)
+        for k, v in feedback.get(row_no, {}).items():
+            if k.startswith("feedback.") and k not in skip_feedback:
+                attrs[k] = clean_cell(v)
+        m = meta.get(row_no, {})
+        idv = {
+            "productNo": _s(ex.get("productNo")),
+            "originalURL": _s(ex.get("originalURL")) or _s(m.get("gather.url")),
+            "name": _s(ex.get("name")),
+            "Pagetype": normalize_pagetype(pagetype_override if pagetype_override and pagetype_override.lower() != "both"
+                                           else _s(ex.get("Pagetype"))),
+            "retailer": _s(m.get("metadata.retailer")),
+            "timestamp": _s(m.get("timestamp_date") or m.get("timestamp")),
+        }
+        p = Product(row_index=row_no, identifiers=idv, attributes=attrs,
+                    original=original.get(row_no) or {**ex, **m})
+        if all(is_empty(idv.get(k)) for k in ("productNo", "originalURL", "name")):
+            p.warnings.append("no identifiers")
+        products.append(p)
+    unknown_pt = sorted({p.identifiers["Pagetype"] for p in products if p.identifiers.get("Pagetype") not in (None, "detail", "search")})
+    if unknown_pt:
+        warnings.append(f"Unrecognized page types {unknown_pt}; choose Detail/Search/Both in the settings.")
+    columns = list(products[0].attributes) if products else []
+    ids = {"productNo": "extract.productNo", "originalURL": "extract.originalURL", "name": "extract.name",
+           "Pagetype": "extract.Pagetype", "retailer": "metadata.retailer"}
+    log.info("Parsed standardized workbook: %d products", len(products))
+    return ParsedFile(products, columns, ids, [], warnings, format="standardized")
+
+
+def _s(v: Any) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return None if is_empty(s) else s
+
+
+def _parse_flat(source: bytes, filename: str, pagetype_override: str | None = None) -> ParsedFile:
     df = read_table(source, filename)
     warnings: list[str] = []
 
@@ -131,7 +258,7 @@ def parse_file(source: str | Path | BinaryIO | bytes, filename: str | None = Non
         if pagetype_override and pagetype_override.lower() != "both":
             idv["Pagetype"] = pagetype_override.lower()
         elif idv.get("Pagetype"):
-            idv["Pagetype"] = idv["Pagetype"].lower()
+            idv["Pagetype"] = normalize_pagetype(idv["Pagetype"])
         p = Product(row_index=i + 2, identifiers=idv, attributes=attrs, original=original)
         if all(is_empty(idv.get(k)) for k in ("productNo", "originalURL", "name")):
             p.warnings.append("no identifiers")

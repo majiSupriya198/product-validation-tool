@@ -199,11 +199,14 @@ def test_mock_perturbations_end_to_end():
     assert by["1007"]["price"].status == "Match"
 
     wb = build_report(run)
-    assert wb.sheetnames == ["Summary", "Attribute Comparison", "Missing Attributes", "Unmatched Products", "Raw DBX Data"]
+    assert wb.sheetnames == ["Overall Summary", "Extract Comparison", "Parsed Comparison", "Feedback Comparison",
+                             "Missing Attributes", "Unmatched Products", "DBX Raw Data"]
     buf = io.BytesIO()
     wb.save(buf)
     wb2 = load_workbook(io.BytesIO(buf.getvalue()))
-    assert wb2["Attribute Comparison"].auto_filter.ref and wb2["Attribute Comparison"].freeze_panes == "F2"
+    assert wb2["Extract Comparison"].auto_filter.ref and wb2["Extract Comparison"].freeze_panes == "G2"
+    # flat upload: columns land in the section of the production field they map to
+    assert {a.section for o in run.found for a in o.attributes} == {"extract"}
     assert wb2["Unmatched Products"].max_row == 2
 
 

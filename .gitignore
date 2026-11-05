@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 output/validation_reports/**/*.xlsx
+output/transformed_files/
 output/logs/
 .DS_Store

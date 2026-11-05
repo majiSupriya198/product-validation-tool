@@ -1,5 +1,20 @@
 # Matching and scoring methodology
 
+## 0. Sections
+
+Every compared attribute belongs to one of three sections, and each section is scored separately.
+That separation shows which part of the pipeline causes a discrepancy.
+
+| Section | Uploaded attributes | Compared with |
+|---|---|---|
+| Extract | `extract.*` (JSON-section CSV) or a flat column that maps to `extract.*` | Production `extract.<same field>` |
+| Parsed | `parsed.*` | Production `parsed.<same field>` |
+| Feedback | `feedback.*`, including `comments` reviewed one by one | Production `feedback.<same field>` |
+
+- **Section-qualified uploads** (JSON-section CSVs and standardized workbooks) are only compared within the same section. `extract.price` is never compared with `parsed.price`.
+- **Flat uploads:** each column belongs to the section of the production field it maps to (§2).
+- **Not compared:** `metadata` and `gather`. They're used for matching (retailer, URL) and kept for traceability.
+
 ## 1. Finding the production record
 
 Products are grouped by page type: `detail` → `sku_detail_v2`, `search` → `sku_search_v2`.
@@ -21,10 +36,23 @@ keeps the newest crawl. The second-newest crawl is fetched too. If the two disag
 name, the product gets the note "Latest two crawls differ", and the newest crawl is still the one
 compared.
 
-**Several retailers** (e.g. `Flink-APP-DE` and `Flink-APP-NL`): the locale in the uploaded URL
-(`/en-DE/`) picks the retailer whose country matches. If that doesn't settle it, the newest record
-is used and the match is marked **ambiguous**. A product found only for another country's retailer
-(URL says DE, record is NL) is also marked ambiguous.
+**Several retailers** (e.g. `Flink-APP-DE` and `Flink-APP-NL`): the tool picks one in this order:
+
+1. The uploaded `metadata.retailer`, when the file has it.
+2. The locale in the uploaded URL (`/en-DE/`), matched to the retailer's country.
+3. Otherwise the newest record, with the match marked **ambiguous**.
+
+A product found only for a different retailer or country than the upload is also marked ambiguous.
+
+**Date range.** By default this is ±3 days around the uploaded crawl timestamps, so the comparison
+uses the production crawl closest in time. Without timestamps it's the last 30 days. Reviews and
+prices change over time, so a wide window adds differences that aren't extraction errors.
+
+**URL formats differ by retailer:**
+- Flink production stores API URLs (`api.goflink.com/.../pdp/<id>`).
+- Walmart production stores `walmart.com/ip/random/<id>`, while the upload has `walmart.com/ip/<id>`.
+
+In both cases the URL pass also tries the number at the end of the URL as a productNo.
 
 Each result keeps: method, identifier value, table, retailer, DBX timestamp, record id, crawl count
 in range, and notes.
@@ -74,7 +102,47 @@ Whitespace-only cells, `[]`, `{}`, `null` and `nan` all count as empty.
 | list | ingredients, bulletPoints, badge | Split on top-level commas/semicolons (not inside brackets, not decimal commas). Items match if equal or word-Jaccard ≥ 0.8. **Score = matched ÷ larger list** |
 | keyvalue | nutrition | Header (`Nährwerte (je 100 g):`) dropped, split into `key: value`. A key matches when all its numbers are equal. **Score = matching keys ÷ all keys on either side** |
 | images | imageURL | Same host: URL set match (matched ÷ larger count). Production re-hosts images (`gather-assets-prod…`), so with different hosts **score = smaller count ÷ larger count**, and URLs are reported as not comparable |
-| nested | comments, promotions | Objects paired by `reviewId`/`id`, else by position. Average share of equal fields per pair ÷ larger count. Leaves like `parsed.promotions.discount` compare as numbers |
+| nested | promotions, contextRatings | Objects paired by `id`, else by position. Average share of equal fields per pair ÷ larger count. Leaves like `parsed.promotions.discount` compare as numbers |
+| dict | JSON objects (`extract.meta`, `extract.wholesale`, …) | Recursive: flatten both, compare each leaf. **Score = equal leaves ÷ all leaves on either side** |
+| reviews | `feedback.comments` | Review by review, see below |
+
+**Section defaults.** A field with no configured comparator gets its section's default:
+
+| Section | Default comparison |
+|---|---|
+| Extract | Numbers numerically, JSON objects key by key, everything else as text |
+| Parsed | Numbers numerically, labels exactly, lists object by object |
+| Feedback | Numbers numerically, review lists review by review, everything else as text |
+
+### Review-level comparison (`feedback_comparator.py`)
+
+**Pairing.** Order never matters. Reviews are paired by:
+
+1. `reviewId` (also `id`, `commentId`)
+2. The same normalized content, username, review date and rating
+3. The same username with content word-F1 ≥ 90%
+
+Steps 2 and 3 only pair reviews when at least one side has no ID. Two different IDs are always two different reviews.
+
+**Per-pair score.** Each pair gets the share of equal fields: rating (numeric), subject and content (word F1), username, and date (the timestamp's day). Fields that are empty in the upload are skipped.
+
+**Per-review status** (shown in Feedback Comparison as "Review" rows):
+
+- Match / Partial / Mismatch, based on the pair score
+- Missing in production: an uploaded review with no partner
+- Extra in production: a production review with no partner
+
+**Attribute score.** `reviews.score_basis` decides it:
+
+| Basis | Score |
+|---|---|
+| `max` (default) | Sum of pair scores ÷ max(uploaded, production) review count. Missing and extra reviews lower the score |
+| `uploaded` | Sum of pair scores ÷ uploaded review count |
+| `paired` | Mean pair score: accuracy only |
+
+The reason always reports both coverage and accuracy, for example: "Uploaded has 50 reviews,
+production 10; 10 paired (10 by reviewId). 40 uploaded reviews aren't in production. Paired
+reviews agree 100%."
 | boolean | video, sponsored, hasRichContent | Equal booleans. Uploaded `False` with an empty production value counts as N/A (`scoring.false_equals_empty`) |
 
 ## 4. Attribute status
@@ -90,8 +158,12 @@ Whitespace-only cells, `[]`, `{}`, `null` and `nan` all count as empty.
 
 ## 5. Product metrics (kept separate)
 
-- **Match %** = weighted mean of attribute scores over Match/Partial/Mismatch/Missing attributes
-  (weights default to 1; set `scoring.weights`).
+- **Extract % / Parsed % / Feedback %** = weighted mean of the section's attribute scores over its
+  Match/Partial/Mismatch/Missing attributes. Weights default to 1; set them with `scoring.weights`.
+  A section with nothing comparable shows "—".
+- **Overall %** depends on `scoring.overall_basis`:
+  - `sections` (default): mean of the section scores that exist, so each section counts equally. Feedback has few attributes but is as important as Extract.
+  - `attributes`: mean over all comparable attributes.
 - **Completeness %** = attributes production fills ÷ attributes that are non-empty in the upload
   and exist in the table.
 - Counts: matched, partial, mismatched, missing in production, unavailable (N/A + not in schema).
@@ -110,3 +182,25 @@ Whitespace-only cells, `[]`, `{}`, `null` and `nan` all count as empty.
 
 Reasons are built only from these comparison results. The tool never states a cause (such as an
 extraction failure) that the data doesn't show.
+
+## 7. Walmart-US findings (JSON-section CSV, live run 2026-11-05)
+
+Input: `11051976_2026-10-29_0001_fixed_….csv`, 85 product pages crawled 2026-10-28. Production was read from `dev_wh`.
+
+**Results by window:**
+
+| Window | Found | Extract | Parsed | Feedback | Overall |
+|---|---|---|---|---|---|
+| Default ±3 days (2026-10-25 to 10-31) | 50 / 85 | 67.7% | 85.0% | 30.2% | 60.8% |
+| 30-day lookback (2026-09-28 to 10-31) | 61 / 85 | 67.3% | 85.9% | 29.8% | 60.6% |
+
+**Production differences that explain most of the gap:**
+
+| Area | What's different |
+|---|---|
+| Reviews | Production keeps about 10 reviews per product; the upload has 50. The reviews present on both sides agree about 99%, so the low Feedback % is mostly coverage, not accuracy. Set `reviews.score_basis: paired` to score accuracy only |
+| Review counts | Production `feedback.commentCount` holds the upload's `totalRatings` (e.g. 5,286 vs 5,278). The upload's `commentCount` (3,656) counts something else. This is a field-definition difference. It isn't aliased; decide which definition is right |
+| Fields production doesn't fill | `extract.gtin`, `extract.contentSpecifications`, `feedback.totalRatings` are empty for every product; `extract.outOfStock` for 47 of 50 |
+| Language | Some production crawls are Spanish (name, description, review text) but tagged `metadata.language = en`, so they can't be filtered out |
+| Prices | `price` differs on 22 of 50 products. Crawl times differ, so check the "Production crawl X days after" note before calling these extraction errors |
+| Units and rounding | `parsed.perUnit` "EA" vs "UNIT", and display-rounded ratings (4.5 vs 4.469), are treated as equal |

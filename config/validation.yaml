@@ -29,9 +29,9 @@ comparators:
   - {pattern: "manufacturer", type: name}
   - {pattern: "seller", type: exact}
   - {pattern: "currency", type: exact}
-  - {pattern: "parsed.perunit", type: exact}    # unit label, e.g. "KG"
-  - {pattern: "perunit", type: exact}
-  - {pattern: "*netquantityunit", type: exact}
+  - {pattern: "parsed.perunit", type: unit}     # unit label: EA = UNIT = PCS, KG = KILOGRAM
+  - {pattern: "perunit", type: unit}
+  - {pattern: "*netquantityunit", type: unit}
   - {pattern: "*promotiontype", type: exact}
   - {pattern: "imageurl", type: images}
   - {pattern: "ingredients", type: list}
@@ -39,7 +39,14 @@ comparators:
   - {pattern: "badge", type: list}
   - {pattern: "breadcrumb", type: list}
   - {pattern: "nutrition", type: keyvalue}
+  - {pattern: "comments", type: reviews}        # review-level comparison (feedback_comparator)
+  - {pattern: "coments", type: reviews}
+  - {pattern: "reviews", type: reviews}
   - {pattern: "comments*", type: nested}
+  - {pattern: "contextratings", type: nested}
+  - {pattern: "totalratings", type: numeric}
+  - {pattern: "totalrecommendations", type: numeric}
+  - {pattern: "recommendation", type: numeric}
   - {pattern: "promotions*", type: nested}
   - {pattern: "parsed.promotions*", type: nested}
   - {pattern: "price", type: numeric}
@@ -53,11 +60,16 @@ comparators:
   - {pattern: "video", type: boolean}
   - {pattern: "hasrichcontent", type: boolean}
   - {pattern: "sponsored", type: boolean}
+  # Anything not matched above uses its section's default (extract/parsed/feedback_comparator.py):
+  # numbers numerically, JSON objects key by key, review lists review by review, the rest as text.
   - {pattern: "*", type: text}
 
 numeric:
   abs_tolerance: 0.01
   rel_tolerance: 0.005
+  # Uploaded "4.5" matches production 4.4694 when production rounded to the uploaded value's
+  # decimal places is equal (display-rounded values). Only applies when the upload has decimals.
+  round_to_uploaded_precision: true
 
 text:
   # list items count as the same if token Jaccard >= this
@@ -73,6 +85,14 @@ scoring:
   # Boolean flags (video, sponsored, ...): uploaded False with an empty production field is
   # treated as "no value" (N/A) rather than missing. Set false to count it as missing.
   false_equals_empty: true
+  # Overall product %: "sections" = mean of the Extract / Parsed / Feedback scores that exist
+  # (each section counts equally); "attributes" = mean over all comparable attributes.
+  overall_basis: sections
+
+reviews:
+  # Feedback comments score: "max" = paired review scores / max(uploaded, production) reviews
+  # (coverage and accuracy), "uploaded" = / uploaded reviews, "paired" = accuracy of paired reviews only.
+  score_basis: max
 
 matching:
   # identifiers per query (one bound parameter each). Lower it if the warehouse rejects large IN lists.

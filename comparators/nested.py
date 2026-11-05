@@ -29,6 +29,28 @@ def _field_equal(a: Any, b: Any) -> bool:
     return norm_strict(a) == norm_strict(b)
 
 
+def compare_dict(up: Any, prod: Any, ctx: CompareContext) -> CompareResult:
+    """Recursive key/value comparison of JSON objects: flatten both, compare each leaf."""
+    from json_flattener import flatten
+
+    fa = {k: v for k, v in flatten(up if isinstance(up, dict) else {}).items() if not is_empty(v)}
+    fb = {k: v for k, v in flatten(prod if isinstance(prod, dict) else {}).items() if not is_empty(v)}
+    keys = list(dict.fromkeys(list(fa) + list(fb)))
+    matched, differ, missing, extra = [], [], [], []
+    for k in keys:
+        if k in fa and k in fb:
+            (matched if _field_equal(fa[k], fb[k]) else differ).append(k)
+        elif k in fa:
+            missing.append(k)
+        else:
+            extra.append(k)
+    score = len(matched) / len(keys) if keys else 1.0
+    ev = {"kind": "keyvalue", "keys": len(keys), "matched": matched,
+          "differ": [f"{k}: {fa[k]} vs {fb[k]}" for k in differ], "up_count": len(fa), "prod_count": len(fb)}
+    return CompareResult(score, "recursive key/value (matched keys / all keys)",
+                         [f"{k}: {fa[k]}" for k in missing], [f"{k}: {fb[k]}" for k in extra], ev)
+
+
 def compare_nested(up: Any, prod: Any, ctx: CompareContext) -> CompareResult:
     a = [x for x in as_list(up) if isinstance(x, dict)]
     b = [x for x in as_list(prod) if isinstance(x, dict)]

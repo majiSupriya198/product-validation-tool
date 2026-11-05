@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from config import DBXSettings, Rules
@@ -86,15 +86,24 @@ def _choose(rows: list[dict], product: Product) -> tuple[dict | None, dict | Non
     retailers = sorted({r["retailer"] for r in latest})
     chosen, note, ambiguous = None, None, False
     country = url_country(product.identifiers.get("originalURL"))
+    up_retailer = product.identifiers.get("retailer")      # from uploaded metadata.retailer, when present
     if len(latest) == 1:
         chosen = latest[0]
         rc = _retailer_country(chosen)
-        if country and rc and rc != country:
+        if up_retailer and chosen["retailer"] != up_retailer:
+            ambiguous = True
+            note = f"Only found for {chosen['retailer']}, but the uploaded record is from {up_retailer}"
+        elif country and rc and rc != country:
             ambiguous = True
             note = (f"Only found for {chosen['retailer']} ({rc}), but the uploaded URL locale is {country}; "
                     "values may be from a different country's site")
     else:
-        if country:
+        if up_retailer:
+            hits = [r for r in latest if r["retailer"] == up_retailer]
+            if len(hits) == 1:
+                chosen = hits[0]
+                note = f"Retailer {up_retailer} chosen from the uploaded metadata among {', '.join(retailers)}"
+        if chosen is None and country:
             hits = [r for r in latest if _retailer_country(r) == country]
             if len(hits) == 1:
                 chosen = hits[0]
@@ -205,6 +214,28 @@ def match_products(products: list[Product], source: Source, settings: DBXSetting
     return results
 
 
+def _crawl_gap(uploaded_ts: str | None, prod_ts: Any) -> str | None:
+    """'Production crawl 1.6 days after the uploaded crawl' (prices and reviews drift with time)."""
+    from datetime import datetime
+
+    def parse(v: Any):
+        s = str(v or "").strip().replace("Z", "+00:00").replace(" ", "T", 1)
+        try:
+            d = datetime.fromisoformat(s)
+            return d if d.tzinfo else d.replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    a, b = parse(uploaded_ts), parse(prod_ts)
+    if not a or not b:
+        return None
+    a, b = a.replace(tzinfo=None), b.replace(tzinfo=None)
+    days = (b - a).total_seconds() / 86400
+    if abs(days) < 0.05:
+        return "Production crawl at the same time as the uploaded crawl"
+    return f"Production crawl {abs(days):.1f} days {'after' if days > 0 else 'before'} the uploaded crawl"
+
+
 def _candidate_pnos(m: MatchResult) -> list[str]:
     ids = [m.product.identifiers.get("productNo"), url_trailing_id(m.product.identifiers.get("originalURL"))]
     return [i for i in dict.fromkeys(ids) if i]
@@ -253,8 +284,13 @@ def _explain_not_found(m: MatchResult, seen: dict[str, list[dict]] | None, setti
     hint = ""
     if wanted and any(r["table"] != wanted and start.isoformat() <= r["last_date"] <= end.isoformat() for r in rows):
         hint = " Found in the other table within the range; set Pagetype to the other table or Both to compare it."
-    elif all(r["last_date"] < start.isoformat() for r in rows):
-        hint = " Widen the date range to compare the older record."
+    else:
+        # judge by the table the product should be compared in, when it has records there
+        focus = [r for r in rows if wanted and r["table"] == wanted] or rows
+        if all(r["last_date"] < start.isoformat() for r in focus):
+            hint = " Widen the date range to compare the older record."
+        elif all(r["last_date"] > end.isoformat() for r in focus):
+            hint = " Only crawled after the range; move the end date later to compare the newer record."
     return "; ".join(parts) + "." + hint + f" (tried {tried})"
 
 
@@ -303,3 +339,6 @@ def _run_pass(source: Source, rules: Rules, table: str, pagetype: str, key_type:
             dis = _crawl_disagreement(chosen, second)
             if dis:
                 m.notes.append(dis)
+            gap = _crawl_gap(m.product.identifiers.get("timestamp"), chosen["ts"])
+            if gap:
+                m.notes.append(gap)

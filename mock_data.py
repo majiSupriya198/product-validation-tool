@@ -8,7 +8,9 @@ Used to test the scoring end to end without Databricks. Perturbation by row posi
   4 -> production has one extra image
   5 -> description: last 3 words removed
   6 -> manufacturer missing in production
-  7..9 -> identical copy
+  7 -> identical copy
+  8 -> feedback reviews: last 2 dropped, first review's rating +1, order reversed
+  9 -> parsed.price +1 and feedback.avgRating -0.1
 Two crawls are generated per product; the older one has a different price so the latest-record
 logic is exercised.
 """
@@ -25,7 +27,8 @@ from dbx_connector import MockSource, _load_snapshot
 from utils.normalization import as_list, parse_number, split_items
 
 PERTURBATIONS = {0: "unmatched", 1: "ingredients -2", 2: "price +0.30", 3: "nutrition -1 entry",
-                 4: "imageURL +1", 5: "description -3 words", 6: "manufacturer missing"}
+                 4: "imageURL +1", 5: "description -3 words", 6: "manufacturer missing",
+                 8: "reviews: 2 missing, 1 rating changed, order reversed", 9: "parsed.price +1, feedback.avgRating -0.1"}
 
 
 def _set_path(rec: dict, path: str, value: Any) -> None:
@@ -63,7 +66,9 @@ def build_mock(parsed: ParsedFile, settings: DBXSettings | None = None, rules: R
         if table not in resolvers:
             resolvers[table] = FieldResolver(rules.aliases, _load_snapshot(table))
         res = resolvers[table]
-        rec: dict[str, Any] = {"extract": {}, "parsed": {}, "feedback": {}, "gather": {}, "metadata": {"retailer": retailer, "country": "DE"}}
+        rec: dict[str, Any] = {"extract": {}, "parsed": {}, "feedback": {}, "gather": {},
+                               "metadata": {"retailer": p.identifiers.get("retailer") or retailer,
+                                            "country": None if p.identifiers.get("retailer") else "DE"}}
         for col, val in p.attributes.items():
             if val is None:
                 continue
@@ -97,6 +102,19 @@ def build_mock(parsed: ParsedFile, settings: DBXSettings | None = None, rules: R
                 ex["description"] = " ".join(words[:-3])
         elif kind == 6:
             ex.pop("manufacturer", None)
+        elif kind == 8:
+            fb = rec["feedback"]
+            reviews = [dict(r) for r in (fb.get("comments") or []) if isinstance(r, dict)]
+            if len(reviews) >= 3:
+                reviews = reviews[:-2]                       # 2 reviews missing in production
+                reviews[0]["rating"] = (parse_number(reviews[0].get("rating")) or 0) + 1   # 1 rating differs
+                fb["comments"] = list(reversed(reviews))     # order must not matter
+        elif kind == 9:
+            pa, fb = rec["parsed"], rec["feedback"]
+            if parse_number(pa.get("price")) is not None:
+                pa["price"] = parse_number(pa["price"]) + 1.0
+            if parse_number(fb.get("avgRating")) is not None:
+                fb["avgRating"] = round(parse_number(fb["avgRating"]) - 0.1, 2)
 
         now = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc) - timedelta(hours=i % 24)
         latest = dict(rec, id=f"mock-{i}-b", timestamp=now.isoformat())

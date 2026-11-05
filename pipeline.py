@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Callable
 
 from comparison_engine import AttributeResult, compare_product
@@ -50,7 +50,15 @@ class RunResult:
         scores = [o.score for o in found if o.score]
         mp = [s.match_pct for s in scores if s.match_pct is not None]
         cp = [s.completeness_pct for s in scores if s.completeness_pct is not None]
+
+        def avg_section(sec: str) -> float | None:
+            v = [s.section_pct(sec) for s in scores if s.section_pct(sec) is not None]
+            return round(sum(v) / len(v), 1) if v else None
+
         return {
+            "avg_extract_pct": avg_section("extract"),
+            "avg_parsed_pct": avg_section("parsed"),
+            "avg_feedback_pct": avg_section("feedback"),
             "uploaded": len(self.outcomes),
             "found": len(found),
             "not_found": len(self.not_found),
@@ -63,6 +71,21 @@ class RunResult:
             "missing_in_prod": sum(s.missing_in_prod for s in scores),
             "unavailable": sum(s.unavailable for s in scores),
         }
+
+
+def default_date_range(parsed: ParsedFile, today: date | None = None, pad_days: int = 3,
+                       fallback_days: int = 30) -> tuple[date, date]:
+    """Production window around the uploaded crawl timestamps (± pad_days, never past today),
+    so the comparison uses the production crawl closest in time. Without timestamps: last 30 days."""
+    today = today or date.today()
+    rng = parsed.timestamp_range
+    if rng:
+        try:
+            lo, hi = date.fromisoformat(rng[0]), date.fromisoformat(rng[1])
+            return lo - timedelta(days=pad_days), min(hi + timedelta(days=pad_days), today)
+        except ValueError:
+            pass
+    return today - timedelta(days=fallback_days), today
 
 
 def run_validation(parsed: ParsedFile, source: Source, settings: DBXSettings, rules: Rules,

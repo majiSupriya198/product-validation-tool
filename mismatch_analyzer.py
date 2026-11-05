@@ -95,6 +95,20 @@ def explain(attribute: str, status: str, res: CompareResult | None, up_value: An
                 parts.append(f"{len(res.missing)} image(s) missing in production.")
             if res.extra:
                 parts.append(f"{len(res.extra)} extra image(s) in production.")
+    elif kind == "reviews":
+        parts.append(f"Uploaded has {ev['up_count']} reviews, production {ev['prod_count']}; {ev['paired']} paired"
+                     + (f" ({', '.join(f'{n} by {m}' for m, n in ev['by_method'].items())})" if ev["by_method"] else "") + ".")
+        if res.missing:
+            parts.append(f"{len(res.missing)} uploaded reviews aren't in production.")
+        if res.extra:
+            parts.append(f"{len(res.extra)} production reviews aren't in the upload.")
+        if ev["paired"]:
+            fa = ", ".join(f"{f} {pct}%" for f, (pct, _) in ev["field_accuracy"].items())
+            parts.append(f"Paired reviews agree {ev['paired_accuracy']}% ({fa}); {ev['differing']} differ.")
+        basis = {"max": "paired review scores ÷ the larger review count",
+                 "uploaded": "paired review scores ÷ uploaded reviews",
+                 "paired": "accuracy of paired reviews only"}[ev["score_basis"]]
+        parts.append(f"Score = {basis}.")
     elif kind == "nested":
         parts.append(f"Uploaded has {ev['up_count']} entries, production {ev['prod_count']}; {ev['paired']} paired.")
         if res.missing:

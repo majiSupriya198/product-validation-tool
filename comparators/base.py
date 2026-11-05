@@ -12,6 +12,7 @@ class CompareResult:
     missing: list[str] = field(default_factory=list)   # in uploaded, absent in production
     extra: list[str] = field(default_factory=list)     # in production, absent in uploaded
     evidence: dict[str, Any] = field(default_factory=dict)
+    details: list[dict[str, Any]] = field(default_factory=list)   # e.g. one row per review
 
     def __post_init__(self) -> None:
         self.score = max(0.0, min(1.0, float(self.score)))
@@ -23,3 +24,4 @@ class CompareContext:
     abs_tol: float = 0.01
     rel_tol: float = 0.005
     item_threshold: float = 0.8
+    round_to_uploaded: bool = True

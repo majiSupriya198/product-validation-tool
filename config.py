@@ -18,6 +18,7 @@ load_dotenv(ROOT / ".env", override=False)
 
 DEFAULT_RULES_PATH = ROOT / "config" / "validation.yaml"
 REPORT_DIR = ROOT / "output" / "validation_reports"
+TRANSFORM_DIR = ROOT / "output" / "transformed_files"
 LOG_DIR = ROOT / "output" / "logs"
 
 _IDENT = re.compile(r"^[A-Za-z0-9_]+$")
@@ -120,6 +121,10 @@ class Rules:
         return float(self.get("numeric", "rel_tolerance", default=0.005))
 
     @property
+    def round_to_uploaded(self) -> bool:
+        return bool(self.get("numeric", "round_to_uploaded_precision", default=True))
+
+    @property
     def item_threshold(self) -> float:
         return float(self.get("text", "item_match_threshold", default=0.8))
 
@@ -138,6 +143,16 @@ class Rules:
     @property
     def missing_counts_as_zero(self) -> bool:
         return bool(self.get("scoring", "missing_counts_as_zero", default=True))
+
+    @property
+    def review_score_basis(self) -> str:
+        v = str(self.get("reviews", "score_basis", default="max")).lower()
+        return v if v in ("max", "uploaded", "paired") else "max"
+
+    @property
+    def overall_basis(self) -> str:
+        v = str(self.get("scoring", "overall_basis", default="sections")).lower()
+        return v if v in ("sections", "attributes") else "sections"
 
     @property
     def false_equals_empty(self) -> bool:

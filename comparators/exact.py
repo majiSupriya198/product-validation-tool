@@ -42,6 +42,20 @@ def compare_name(up: Any, prod: Any, ctx: CompareContext) -> CompareResult:
                          {"kind": "words", "common": common, "up_count": len(ta), "prod_count": len(tb)})
 
 
+def compare_unit(up: Any, prod: Any, ctx: CompareContext) -> CompareResult:
+    """Unit labels: EA / EACH / UNIT / PCS / STK are one unit; KG / KILOGRAM, L / LITER likewise."""
+    from utils.normalization import parse_unit
+
+    a, b = norm_strict(up), norm_strict(prod)
+    if a == b:
+        return CompareResult(1.0, "unit", evidence={"kind": "exact", "equal": True})
+    ua, ub = parse_unit(f"1 {a}"), parse_unit(f"1 {b}")
+    if ua and ub and ua == ub:
+        return CompareResult(1.0, "unit (equivalent labels)",
+                             evidence={"kind": "exact", "equal": True, "note": f"'{up}' and '{prod}' are the same unit"})
+    return CompareResult(0.0, "unit", evidence={"kind": "exact", "equal": False})
+
+
 def compare_boolean(up: Any, prod: Any, ctx: CompareContext) -> CompareResult:
     a, b = parse_bool(up), parse_bool(prod)
     if a is None or b is None:
