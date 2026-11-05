@@ -41,6 +41,9 @@ No data is lost in the transformation:
 
 ## Setup
 
+For a step-by-step guide (prerequisites, Databricks token and permissions, first run, troubleshooting),
+see **[SETUP.md](SETUP.md)**. In short:
+
 ```bash
 cd product-validation-tool
 python3.11 -m venv .venv
